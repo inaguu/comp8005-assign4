@@ -13,6 +13,24 @@ from passlib.context import CryptContext
 
 BUFFER_SIZE = 1024
 
+import ctypes
+from pathlib import Path
+
+_lib = ctypes.CDLL(str(Path(__file__).with_name("libyescrypt_wrap.so")))
+
+_lib.verify_yescrypt.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
+_lib.verify_yescrypt.restype = ctypes.c_int
+
+
+def verify_yescrypt(password: str, full_hash: str) -> bool:
+    rc = _lib.verify_yescrypt(
+        password.encode("utf-8"),
+        full_hash.encode("utf-8"),
+    )
+    if rc == -1:
+        raise RuntimeError("verify_yescrypt() failed")
+    return rc == 1
+
 class WorkerInfo:
     def __init__(self):
         self.connection = None
@@ -124,10 +142,12 @@ def crack_chunk(worker_info, chunk_start, chunk_end):
     print(f"[CHUNK] {chunk_start} -> {chunk_end}")
     print("Cracking password...")
 
+    yescrypt_flag = False
     # build hash for passlib
     if algo == "2b":
         full_hash = f"${algo}${options}${salt}{hashed}"
     elif algo == "y":
+        yescrypt_flag = True
         full_hash = f"${algo}${options}${salt}${hashed}"
     else:
         full_hash = f"${algo}${salt}${hashed}"
@@ -139,7 +159,7 @@ def crack_chunk(worker_info, chunk_start, chunk_end):
     for i in range(worker_info.threads):
         s = chunk_start + i * per_thread
         e = chunk_start + (i + 1) * per_thread if i != worker_info.threads - 1 else chunk_end
-        t = threading.Thread(target=crack_password, args=(worker_info, s, e, full_hash))
+        t = threading.Thread(target=crack_password, args=(worker_info, s, e, full_hash, yescrypt_flag))
         t.start()
         threads.append(t)
 
@@ -154,7 +174,7 @@ def crack_chunk(worker_info, chunk_start, chunk_end):
         worker_info.timing["end_time"] - worker_info.timing["start_time"]
     )
 
-def crack_password(worker_info, chunk_start, chunk_end, full_hash):
+def crack_password(worker_info, chunk_start, chunk_end, full_hash, yesscrypt_flag):
     for i in range(chunk_start, chunk_end):
         if worker_info.found_event.is_set():
             return
@@ -169,7 +189,12 @@ def crack_password(worker_info, chunk_start, chunk_end, full_hash):
                 send_checkpoint(worker_info, i)
 
         try:
-            if worker_info.pwd_context.verify(password, full_hash):
+            print
+            if yesscrypt_flag and verify_yescrypt(password, full_hash):
+                worker_info.result = password
+                worker_info.found_event.set()
+                return
+            elif worker_info.pwd_context.verify(password, full_hash):
                 worker_info.result = password
                 worker_info.found_event.set()
                 return
