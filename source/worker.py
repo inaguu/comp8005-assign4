@@ -233,6 +233,9 @@ def crack_chunk(worker_info, chunk_start, chunk_end):
     worker_info.timing["start_time"] = time.perf_counter()
     worker_info.found_event.clear()
 
+    print(f"[CHUNK] {chunk_start} -> {chunk_end}") 
+    print("Cracking password...")
+
     algo = worker_info.data.get("algorithm")
     salt = worker_info.data.get("salt")
     options = worker_info.data.get("options", "")
