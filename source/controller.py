@@ -262,7 +262,7 @@ def send_job(controller_info, conn, chunk):
 
     controller_info.dispatch_time = time.perf_counter() - start
     print(f"[DISPATCH] Worker assigned range {chunk[0]} -> {chunk[1]}")
-    print(f"[DISPATCH] Checkpoint interval: {controller_info.checkpoint}")
+    # print(f"[DISPATCH] Checkpoint interval: {controller_info.checkpoint}")
 
 def send_stop(conn):
     msg = {"type": "stop"}

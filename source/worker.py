@@ -181,7 +181,7 @@ def crack_chunk(worker_info, chunk_start, chunk_end):
         s = chunk_start + i * per_thread
         e = chunk_start + (i + 1) * per_thread if i != worker_info.threads - 1 else chunk_end
 
-        print(f"[THREAD-{i}] Assigned {s} -> {e}")
+        # print(f"[THREAD-{i}] Assigned {s} -> {e}")
 
         password_chunk = get_chunk(worker_info, s, e)
 
@@ -259,7 +259,7 @@ def send_checkpoint(worker_info, current_index):
 
     try:
         worker_info.connection.sendall(json.dumps(msg).encode())
-        print(f"[CHECKPOINT] Sent at index {current_index}")
+        # print(f"[CHECKPOINT] Sent at index {current_index}")
     except (BrokenPipeError, OSError):
         print("[WORKER] Connection lost during checkpoint")
         worker_info.found_event.set()
