@@ -38,4 +38,4 @@ user14:$y$j9T$ql.pFSHLNUKNrzJDslG7A0$iBcEMFfI1nS9EZYRtxYF0xBv0.es96Ot0hStJWyOCq6
 user15:$y$j9T$SrYeIrf1zdVZjxx4PkOwZ0$VwSgwQybogSbFT8xZvzrSmMas5Rjo1aNvaWIepsjd51:20474:0:99999:7:::
 
 four character password (aaaa)
-user16:md5-aaaa:$1$salt123$4uqlE25bM/IM2JegL1ZUj1
+user16:$1$salt123$4uqlE25bM/IM2JegL1ZUj1
