@@ -47,6 +47,8 @@ class ControllerInfo:
         self.worker_progress = {}
         self.requeue_chunks = []
 
+        self.hb_logs = []
+
 def parse_arguments(controller_info):
     parser = argparse.ArgumentParser(description="Password Cracking Controller")
     parser.add_argument("-f", "--file", required=True, help="Path to shadow file")
@@ -105,7 +107,10 @@ def parse_shadow(controller_info):
                         controller_info.data["salt"] = parts[2]
                         controller_info.data["password"] = parts[3]
 
-                    controller_info.parse_time = time.perf_counter() - start        
+                    controller_info.parsing_time = time.perf_counter() - start        
+                    print("\n[INIT] Shadow parsing complete")
+                    print(f"[INIT] Algorithm: {controller_info.data['algorithm']}")
+                    print(f"[INIT] Parsing Time: {controller_info.parsing_time:.6f}s")
                     return
                 
         usage(f"User '{controller_info.username}' not found in {controller_info.shadowfile}")
@@ -122,7 +127,7 @@ def init_socket(controller_info):
         sock.bind(addr)
         sock.listen()
         sock.settimeout(1) 
-        print(f"Controller listening on: {sock.getsockname()}")
+        print(f"[INIT] Controller listening on: {sock.getsockname()}")
         controller_info.socket = sock
     except OSError as e:
         usage(f"Failed to bind socket: {e}")
@@ -134,7 +139,7 @@ def wait_for_workers(controller_info):
 
         try:
             conn, addr = controller_info.socket.accept()
-            print(f"\nConnected to worker: {addr}")
+            print(f"\n[CONNECT] Worker connected from {addr}")
 
             thread = threading.Thread(
                 target=handle_connection,
@@ -148,7 +153,7 @@ def wait_for_workers(controller_info):
         except OSError as e:
             print("[WARNING] Accept failed:", e)
             continue
-        
+
 def handle_connection(controller_info, conn):
     with controller_info.worker_lock:
         controller_info.workers.append(conn)
@@ -189,42 +194,43 @@ def handle_connection(controller_info, conn):
 
             elif msg_type == "found":
                 receive_time = time.perf_counter()
-
                 send_time = msg.get("sent_time", receive_time)
-
                 latency = receive_time - send_time
-
-                # print(f"[RESULT LATENCY] {latency:.6f}s")
 
                 controller_info.found = True
                 controller_info.result.append(msg)
-
                 controller_info.result.append({
-                    "worker": msg["who"],
+                    "worker": msg["worker"],
                     "password": msg["password"],
                     "latency": latency,
                     "cracking_time": msg["timing"]["cracking_time"]
                 })
 
-                print(f"[FOUND] {msg['password']}")
+                print("\n[RESULT FOUND]")
+                print(f"[RESULT] Password: {msg['password']}")
+                print(f"[RESULT] Found by Worker: {msg['worker']}")
+                print(f"[RESULT] Worker Cracking Time: {msg['timing']['cracking_time']:.6f}s")
+                print(f"[RESULT] Return Latency: {latency:.6f}s")
 
                 broadcast_stop(controller_info, conn)
 
             elif msg_type == "hb_response":
-                print(f"[HB] {msg.get('tested_since_last')}")
-            
+                tested = msg.get("tested_since_last", 0)
+                timestamp = time.perf_counter()
+                controller_info.hb_logs.append((timestamp, tested))
+                print(f"[HEARTBEAT] Worker progress since last: {tested}")
+
             elif msg_type == "checkpoint":
                 with controller_info.worker_lock:
                     controller_info.worker_progress[conn] = msg.get("current")
-                print(f"[CHECKPOINT] {msg.get('worker')} -> {msg.get('current')}")
+                print(f"[CHECKPOINT] Worker {msg.get('worker')} at index {msg.get('current')}")
 
     except OSError:
-        print("Worker disconnected")
+        print("[WARNING] Worker disconnected")
 
     finally:
         with controller_info.worker_lock:
             if conn in controller_info.worker_chunks:
-
                 chunk_start, chunk_end = controller_info.worker_chunks[conn]
                 progress = controller_info.worker_progress.get(conn, chunk_start)
 
@@ -247,8 +253,6 @@ def send_job(controller_info, conn, chunk):
     controller_info.data["chunk_end"] = chunk[1]
     controller_info.data["checkpoint"] = controller_info.checkpoint
 
-    # print("Sent job: ", controller_info.data)
-
     payload = json.dumps(controller_info.data).encode("utf-8")
     conn.sendall(payload)
 
@@ -257,6 +261,8 @@ def send_job(controller_info, conn, chunk):
         controller_info.worker_progress[conn] = chunk[0]
 
     controller_info.dispatch_time = time.perf_counter() - start
+    print(f"[DISPATCH] Worker assigned range {chunk[0]} -> {chunk[1]}")
+    print(f"[DISPATCH] Checkpoint interval: {controller_info.checkpoint}")
 
 def send_stop(conn):
     msg = {"type": "stop"}
@@ -275,7 +281,6 @@ def broadcast_stop(controller_info, conn):
             pass
 
 def get_chunk(controller_info):
-
     if controller_info.requeue_chunks:
         return controller_info.requeue_chunks.pop(0)
 
@@ -307,31 +312,58 @@ def heartbeat_loop(controller_info):
                 pass
 
 def print_report(controller_info):
-    print("\n===== PERFORMANCE REPORT =====")
+    print("\n================ PERFORMANCE REPORT ================")
 
+    # Controller metrics
+    print("\n[CONTROLLER METRICS]")
     print(f"Parsing Time: {controller_info.parsing_time:.6f}s")
-    print(f"Dispatch Time: {controller_info.dispatch_time:.6f}s")
+    print(f"Dispatch Overhead: {controller_info.dispatch_time:.6f}s")
 
     if controller_info.total_chunks > 0:
         avg_chunk = controller_info.chunk_assign_time / controller_info.total_chunks
     else:
         avg_chunk = 0
 
-    print(f"Chunk Assign Total: {controller_info.chunk_assign_time:.6f}s")
-    print(f"Chunk Assign Avg: {avg_chunk:.6f}s")
+    print(f"Work Assignment Total: {controller_info.chunk_assign_time:.6f}s")
+    print(f"Work Assignment Avg per Chunk: {avg_chunk:.6f}s")
+    print(f"Total Chunks Assigned: {controller_info.total_chunks}")
 
+    # Worker result
     r = controller_info.result[1]
-    print(f"\nWorker {r['worker']}:")
+
+    print("\n[WORKER PERFORMANCE]")
+    print(f"Worker ID: {r['worker']}")
     print(f"Cracking Time: {r['cracking_time']:.6f}s")
     print(f"Result Latency: {r['latency']:.6f}s")
 
-    total_time = controller_info.end_time - controller_info.start_time
-    print(f"\nTotal Runtime: {total_time:.6f}s")
+    # Heartbeat analysis
+    print("\n[HEARTBEAT ANALYSIS]")
+    if controller_info.hb_logs:
+        rates = [entry[1] for entry in controller_info.hb_logs]
+        avg_rate = sum(rates) / len(rates)
+        print(f"Heartbeat Count: {len(rates)}")
+        print(f"Avg Progress per Heartbeat: {avg_rate:.2f}")
+        print(f"Min Progress: {min(rates)}")
+        print(f"Max Progress: {max(rates)}")
+    else:
+        print("No heartbeat data collected")
 
+    # Checkpoint observations
+    print("\n[CHECKPOINT OBSERVATIONS]")
+    print(f"Checkpoint Interval Configured: {controller_info.checkpoint}")
+    if controller_info.requeue_chunks:
+        print(f"Requeued Chunks (failures): {len(controller_info.requeue_chunks)}")
+    else:
+        print("No worker failures detected")
+
+    # Total runtime
+    total_time = controller_info.end_time - controller_info.start_time
+    print("\n[TOTAL RUNTIME]")
+    print(f"End-to-End Time: {total_time:.6f}s")
+    print("\n===================================================")
 
 def main():
     controller_info = ControllerInfo()
-
     controller_info.start_time = time.perf_counter()
 
     parse_arguments(controller_info)
@@ -346,11 +378,10 @@ def main():
         )
         hb_thread.start()
 
-    print("Waiting for workers...")
+    print("\n[STATUS] Waiting for workers...")
     wait_for_workers(controller_info)
 
     controller_info.end_time = time.perf_counter()
-
     print_report(controller_info)
 
 if __name__ == "__main__":
