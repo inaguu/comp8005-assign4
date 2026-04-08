@@ -10,17 +10,15 @@ import time
 import threading
 
 from passlib.context import CryptContext
-
-BUFFER_SIZE = 1024
-
 import ctypes
 from pathlib import Path
 
-_lib = ctypes.CDLL(str(Path(__file__).with_name("libyescrypt_wrap.so")))
+BUFFER_SIZE = 1024
 
+# Yescrypt C library
+_lib = ctypes.CDLL(str(Path(__file__).with_name("libyescrypt_wrap.so")))
 _lib.verify_yescrypt.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
 _lib.verify_yescrypt.restype = ctypes.c_int
-
 
 def verify_yescrypt(password: str, full_hash: str) -> bool:
     rc = _lib.verify_yescrypt(
@@ -70,6 +68,9 @@ class WorkerInfo:
             deprecated="auto"
         )
 
+# -----------------------
+# Basic utility functions
+# -----------------------
 def usage(message):
     print(message)
     sys.exit(1)
@@ -95,7 +96,6 @@ def parse_arguments(worker_info):
 
 def connect_to_server(worker_info):
     addr = validate_address(worker_info.ip, worker_info.port)
-
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.connect(addr)
@@ -105,6 +105,9 @@ def connect_to_server(worker_info):
     except OSError as e:
         usage(f"Failed to connect to server: {e}")
 
+# -----------------------
+# Heartbeat handling
+# -----------------------
 def handle_heartbeat(worker_info):
     try:
         data = worker_info.connection.recv(BUFFER_SIZE)
@@ -130,7 +133,103 @@ def handle_heartbeat(worker_info):
     except json.JSONDecodeError:
         return
 
+def heartbeat_loop(worker_info):
+    """Dedicated thread for heartbeat"""
+    while not worker_info.found_event.is_set():
+        handle_heartbeat(worker_info)
+        time.sleep(0.05)
+
+# -----------------------
+# Password generation
+# -----------------------
+def gen_pass(val: int, search_space: str) -> str:
+    n = len(search_space)
+    size = 1
+    block = n
+    while val >= block:
+        val -= block
+        size += 1
+        block *= n
+    chars = [""] * size
+    for i in range(size - 1, -1, -1):
+        chars[i] = search_space[val % n]
+        val //= n
+    return "".join(chars)
+
+# -----------------------
+# Checkpoint & result
+# -----------------------
+def send_checkpoint(worker_info, current_index):
+    msg = {"type": "checkpoint", "worker": socket.gethostname(), "current": current_index}
+    try:
+        worker_info.connection.sendall(json.dumps(msg).encode())
+    except (BrokenPipeError, OSError):
+        print("[WORKER] Connection lost during checkpoint")
+        worker_info.found_event.set()
+
+def send_found(worker_info):
+    msg = {
+        "type": "found",
+        "password": worker_info.result,
+        "who": worker_info.connection.getsockname(),
+        "timing": worker_info.timing,
+        "sent_time": time.perf_counter()
+    }
+    try:
+        worker_info.connection.sendall(json.dumps(msg).encode())
+    except (BrokenPipeError, OSError):
+        print("[WORKER] Controller disconnected while sending result")
+
+# -----------------------
+# Cracking logic
+# -----------------------
+def crack_password(worker_info, chunk_start, chunk_end, full_hash, yescrypt_flag, thread_id):
+    """
+    Optimized password cracking loop.
+    """
+    local_tested = 0
+
+    for i in range(chunk_start, chunk_end):
+        if worker_info.found_event.is_set():
+            return
+
+        password = gen_pass(i, worker_info.charset)
+        local_tested += 1
+
+        # Batch update tested_since_last
+        if local_tested >= 100:
+            with worker_info.lock:
+                worker_info.tested_since_last += local_tested
+            local_tested = 0
+
+        # Only thread 0 sends checkpoints
+        if thread_id == 0 and i % worker_info.checkpoint == 0:
+            send_checkpoint(worker_info, i)
+
+        # Verify password
+        try:
+            if yescrypt_flag:
+                if verify_yescrypt(password, full_hash):
+                    worker_info.result = password
+                    worker_info.found_event.set()
+                    return
+            else:
+                if worker_info.pwd_context.verify(password, full_hash):
+                    worker_info.result = password
+                    worker_info.found_event.set()
+                    return
+        except Exception:
+            continue
+
+    # Update any remaining tested count
+    if local_tested > 0:
+        with worker_info.lock:
+            worker_info.tested_since_last += local_tested
+
 def crack_chunk(worker_info, chunk_start, chunk_end):
+    """
+    Cracking chunk with multiple threads (no thread pool reuse).
+    """
     worker_info.timing["start_time"] = time.perf_counter()
     worker_info.found_event.clear()
 
@@ -139,11 +238,7 @@ def crack_chunk(worker_info, chunk_start, chunk_end):
     options = worker_info.data.get("options", "")
     hashed = worker_info.data.get("password")
 
-    print(f"[CHUNK] {chunk_start} -> {chunk_end}")
-    print("Cracking password...")
-
     yescrypt_flag = False
-    # build hash for passlib
     if algo == "2b":
         full_hash = f"${algo}${options}${salt}{hashed}"
     elif algo == "y":
@@ -159,7 +254,10 @@ def crack_chunk(worker_info, chunk_start, chunk_end):
     for i in range(worker_info.threads):
         s = chunk_start + i * per_thread
         e = chunk_start + (i + 1) * per_thread if i != worker_info.threads - 1 else chunk_end
-        t = threading.Thread(target=crack_password, args=(worker_info, s, e, full_hash, yescrypt_flag))
+        t = threading.Thread(
+            target=crack_password,
+            args=(worker_info, s, e, full_hash, yescrypt_flag, i)
+        )
         t.start()
         threads.append(t)
 
@@ -174,55 +272,9 @@ def crack_chunk(worker_info, chunk_start, chunk_end):
         worker_info.timing["end_time"] - worker_info.timing["start_time"]
     )
 
-def crack_password(worker_info, chunk_start, chunk_end, full_hash, yesscrypt_flag):
-    for i in range(chunk_start, chunk_end):
-        if worker_info.found_event.is_set():
-            return
-
-        handle_heartbeat(worker_info)
-
-        password = gen_pass(i, worker_info.charset)
-
-        with worker_info.lock:
-            worker_info.tested_since_last += 1
-            if i % worker_info.checkpoint == 0:
-                send_checkpoint(worker_info, i)
-
-        try:
-            print
-            if yesscrypt_flag and verify_yescrypt(password, full_hash):
-                worker_info.result = password
-                worker_info.found_event.set()
-                return
-            elif worker_info.pwd_context.verify(password, full_hash):
-                worker_info.result = password
-                worker_info.found_event.set()
-                return
-        except Exception:
-            continue
-
-def send_checkpoint(worker_info, current_index):
-    msg = {"type": "checkpoint", "worker": socket.gethostname(), "current": current_index}
-    try:
-        worker_info.connection.sendall(json.dumps(msg).encode())
-    except (BrokenPipeError, OSError):
-        print("[WORKER] Connection lost during checkpoint")
-        worker_info.found_event.set()
-
-def gen_pass(val: int, search_space: str) -> str:
-    n = len(search_space)
-    size = 1
-    block = n
-    while val >= block:
-        val -= block
-        size += 1
-        block *= n
-    chars = [""] * size
-    for i in range(size - 1, -1, -1):
-        chars[i] = search_space[val % n]
-        val //= n
-    return "".join(chars)
-
+# -----------------------
+# Server communication
+# -----------------------
 def request_chunk(worker_info):
     msg = {"type": "get_work"}
     try:
@@ -246,25 +298,16 @@ def receive_chunk(worker_info):
         except json.JSONDecodeError:
             continue
 
-def send_found(worker_info):
-    hostname = socket.gethostname()
-    ipv4_address = socket.gethostbyname(hostname)
-    msg = {
-        "type": "found",
-        "password": worker_info.result,
-        "who": ipv4_address,
-        "timing": worker_info.timing,
-        "sent_time": time.perf_counter()
-    }
-    try:
-        worker_info.connection.sendall(json.dumps(msg).encode())
-    except (BrokenPipeError, OSError):
-        print("[WORKER] Controller disconnected while sending result")
-
+# -----------------------
+# Main
+# -----------------------
 def main():
     worker_info = WorkerInfo()
     parse_arguments(worker_info)
     connect_to_server(worker_info)
+
+    # Start heartbeat thread
+    threading.Thread(target=heartbeat_loop, args=(worker_info,), daemon=True).start()
 
     while not worker_info.found_event.is_set():
         request_chunk(worker_info)
