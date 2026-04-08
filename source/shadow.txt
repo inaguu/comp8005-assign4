@@ -36,3 +36,6 @@ yescrypt abc - A2# - 456
 user13:$y$j9T$HjgMvmSW0Ii.IpKGM9JHq1$MQXJaa0/zzkxdG1NzeCt3U4QeGPQEtOkiTwnlU4J.z2:20474:0:99999:7:::
 user14:$y$j9T$ql.pFSHLNUKNrzJDslG7A0$iBcEMFfI1nS9EZYRtxYF0xBv0.es96Ot0hStJWyOCq6:20474:0:99999:7:::
 user15:$y$j9T$SrYeIrf1zdVZjxx4PkOwZ0$VwSgwQybogSbFT8xZvzrSmMas5Rjo1aNvaWIepsjd51:20474:0:99999:7:::
+
+four character password (aaaa)
+user16:md5-aaaa:$1$salt123$4uqlE25bM/IM2JegL1ZUj1
