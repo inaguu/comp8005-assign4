@@ -159,7 +159,10 @@ def crack_chunk(worker_info, chunk_start, chunk_end):
     for i in range(worker_info.threads):
         s = chunk_start + i * per_thread
         e = chunk_start + (i + 1) * per_thread if i != worker_info.threads - 1 else chunk_end
-        t = threading.Thread(target=crack_password, args=(worker_info, s, e, full_hash, yescrypt_flag))
+
+        password_chunk = get_chunk(worker_info, s, e)
+
+        t = threading.Thread(target=crack_password, args=(worker_info, password_chunk, full_hash, yescrypt_flag))
         t.start()
         threads.append(t)
 
@@ -174,14 +177,14 @@ def crack_chunk(worker_info, chunk_start, chunk_end):
         worker_info.timing["end_time"] - worker_info.timing["start_time"]
     )
 
-def crack_password(worker_info, chunk_start, chunk_end, full_hash, yesscrypt_flag):
-    for i in range(chunk_start, chunk_end):
+def crack_password(worker_info, password_chunk, full_hash, yesscrypt_flag):
+    for i in range(len(password_chunk)):
         if worker_info.found_event.is_set():
             return
 
         handle_heartbeat(worker_info)
 
-        password = gen_pass(i, worker_info.charset)
+        password = password_chunk[i]
 
         with worker_info.lock:
             worker_info.tested_since_last += 1
@@ -222,6 +225,14 @@ def gen_pass(val: int, search_space: str) -> str:
         chars[i] = search_space[val % n]
         val //= n
     return "".join(chars)
+
+def get_chunk(worker_info, chunk_start, chuck_end): 
+    chunk_passwords = [] 
+    
+    for i in range(chunk_start, chuck_end): 
+        chunk_passwords.append(gen_pass(i, worker_info.charset))
+    
+    return chunk_passwords
 
 def request_chunk(worker_info):
     msg = {"type": "get_work"}
