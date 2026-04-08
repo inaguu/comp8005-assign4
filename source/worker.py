@@ -203,7 +203,7 @@ def crack_password(worker_info, chunk_start, chunk_end, full_hash, yescrypt_flag
             local_tested = 0
 
         # Only thread 0 sends checkpoints
-        if thread_id == 0 and i % worker_info.checkpoint == 0:
+        if i % worker_info.checkpoint == 0:
             send_checkpoint(worker_info, i)
 
         # Verify password
